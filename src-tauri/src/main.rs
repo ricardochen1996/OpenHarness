@@ -12,7 +12,7 @@ use std::cmp::Ordering as CompareOrdering;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,6 +61,13 @@ const APP_UPDATE_MENU_ID: &str = "app-update";
 const SESSION_MENU_LABEL_LIMIT: usize = 96;
 const SESSION_MENU_ID_PREFIX: &str = "session:";
 const WEBVIEW_INIT_SCRIPT: &str = include_str!("../webview-init.js");
+/// Rotate the backend log rather than growing it without bound.
+const BACKEND_LOG_LIMIT: u64 = 1024 * 1024;
+/// Startup diagnostics carried into the error dialog; the full log has more.
+const ERROR_DIALOG_OUTPUT_LINES: usize = 6;
+const ERROR_DIALOG_LINE_LIMIT: usize = 240;
+/// Backend output kept in memory for failure reports, in lines.
+const RECENT_OUTPUT_LIMIT: usize = 12;
 
 #[cfg(target_os = "macos")]
 extern "C" {
@@ -366,6 +373,189 @@ fn command_stdout_with_timeout(
     Ok(output)
 }
 
+/// Backend diagnostics must outlive the console: Windows GUI builds have no
+/// stderr, so `eprintln!` alone cannot explain a startup failure to the user.
+/// The path is settable rather than write-once so app setup can refine the early
+/// launch-time guess into the platform's application-data directory.
+static BACKEND_LOG: Mutex<Option<PathBuf>> = Mutex::new(None);
+static LAST_LOG_ERROR: AtomicBool = AtomicBool::new(false);
+
+fn last_log_error() -> &'static AtomicBool {
+    &LAST_LOG_ERROR
+}
+
+fn resolve_log_directory(
+    local_app_data: Option<OsString>,
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+) -> PathBuf {
+    if let Some(directory) = local_app_data.filter(|value| !value.is_empty()) {
+        return PathBuf::from(directory).join("OpenHarness/logs");
+    }
+    if let Some(directory) = xdg_state_home.filter(|value| !value.is_empty()) {
+        return PathBuf::from(directory).join("OpenHarness/logs");
+    }
+    if let Some(directory) = home.filter(|value| !value.is_empty()) {
+        return PathBuf::from(directory).join(".local/state/OpenHarness/logs");
+    }
+    std::env::temp_dir().join("OpenHarness/logs")
+}
+
+fn fallback_log_directory() -> PathBuf {
+    resolve_log_directory(
+        std::env::var_os("LOCALAPPDATA"),
+        std::env::var_os("XDG_STATE_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn install_backend_log(directory: PathBuf) {
+    let _ = fs::create_dir_all(&directory);
+    if let Ok(mut path) = BACKEND_LOG.lock() {
+        *path = Some(directory.join("backend.log"));
+    }
+}
+
+/// Reserve the log path before any runtime work starts, so the earliest startup
+/// failure still has somewhere to land.
+fn initialize_backend_log() {
+    install_backend_log(fallback_log_directory());
+}
+
+/// The app framework knows the platform's application-data directory, which is a
+/// better home for logs than the environment-variable fallback.
+fn finalize_backend_log_directory(app_local_data: Option<PathBuf>) {
+    let directory = match app_local_data.filter(|path| !path.as_os_str().is_empty()) {
+        Some(base) => base.join("OpenHarness/logs"),
+        None => fallback_log_directory(),
+    };
+    install_backend_log(directory);
+}
+
+fn backend_log_path() -> Option<PathBuf> {
+    BACKEND_LOG.lock().ok().and_then(|path| path.clone())
+}
+
+fn rotate_backend_log(path: &Path) {
+    let oversized = fs::metadata(path).is_ok_and(|metadata| metadata.len() > BACKEND_LOG_LIMIT);
+    if !oversized {
+        return;
+    }
+    let _ = fs::remove_file(path.with_extension("log.1"));
+    let _ = fs::rename(path, path.with_extension("log.1"));
+}
+
+/// Append one line to the backend log. Drop logs to a single failed attempt
+/// instead of retrying on every line.
+fn write_backend_log(line: &str) {
+    let Some(path) = backend_log_path() else {
+        return;
+    };
+    if last_log_error().load(Ordering::SeqCst) {
+        return;
+    }
+    rotate_backend_log(&path);
+    match fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            if std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()).is_err() {
+                last_log_error().store(true, Ordering::SeqCst);
+            }
+        }
+        Err(_) => last_log_error().store(true, Ordering::SeqCst),
+    }
+}
+
+/// Read a child stream line by line without demanding UTF-8. A strict
+/// `BufRead::read_line` fails on the first non-UTF-8 byte, which would end the
+/// reader thread and make the supervisor report a startup failure even while
+/// the child is still running.
+fn read_stream_lines<R: Read>(mut stream: R, mut on_line: impl FnMut(String)) {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) if byte[0] == b'\n' => {
+                let owned = std::mem::take(&mut line);
+                on_line(String::from_utf8_lossy(&owned).into_owned());
+            }
+            Ok(_) => line.push(byte[0]),
+            Err(_) => break,
+        }
+    }
+    if !line.is_empty() {
+        on_line(String::from_utf8_lossy(&line).into_owned());
+    }
+}
+
+/// Forward one backend stream to the log, the recent-output buffer, and the
+/// startup channel, with the boot URL redacted.
+fn forward_backend_stream<R: Read>(
+    stream: R,
+    prefix: &'static str,
+    recent: Arc<Mutex<Vec<String>>>,
+    output_tx: Option<mpsc::Sender<Result<String, std::io::Error>>>,
+) {
+    read_stream_lines(stream, |line| {
+        let trimmed = line.trim_end().to_owned();
+        let logged = runtime_log_line(&trimmed);
+        write_backend_log(&format!("{prefix}{logged}"));
+        if !trimmed.is_empty() {
+            if let Ok(mut lines) = recent.lock() {
+                lines.push(logged.to_owned());
+                if lines.len() > RECENT_OUTPUT_LIMIT {
+                    lines.remove(0);
+                }
+            }
+        }
+        if let Some(sender) = &output_tx {
+            let _ = sender.send(Ok(trimmed));
+        }
+    });
+}
+
+fn truncate_for_dialog(line: &str) -> String {
+    if line.chars().count() <= ERROR_DIALOG_LINE_LIMIT {
+        return line.to_owned();
+    }
+    let mut truncated: String = line.chars().take(ERROR_DIALOG_LINE_LIMIT).collect();
+    truncated.push('…');
+    truncated
+}
+
+/// Compose a failure message a user can act on: what happened, what the backend
+/// said, and where the full log lives.
+fn backend_failure_message(
+    detail: &str,
+    recent: &Mutex<Vec<String>>,
+    log_path: Option<&Path>,
+) -> String {
+    let lines = recent.lock().map(|lines| lines.clone()).unwrap_or_default();
+    let tail: Vec<&String> = lines
+        .iter()
+        .rev()
+        .take(ERROR_DIALOG_OUTPUT_LINES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let mut message = detail.to_owned();
+    if !tail.is_empty() {
+        message.push_str("\n\n");
+        message.push_str(
+            &tail
+                .iter()
+                .map(|line| truncate_for_dialog(line))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if let Some(path) = log_path {
+        message.push_str(&format!("\n\nLog: {}", path.display()));
+    }
+    message
+}
+
 fn terminate_command(child: &mut Child) {
     #[cfg(unix)]
     unsafe {
@@ -538,7 +728,7 @@ fn spawn_harness(
     resource_dir: &Path,
     home: &Path,
     shell_env: &[(String, String)],
-) -> Result<(Child, Url), Box<dyn std::error::Error>> {
+) -> Result<(Child, Url, Arc<Mutex<Vec<String>>>), Box<dyn std::error::Error>> {
     let runtime = resolve_runtime(resource_dir)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
     let dsh_home = resolve_dsh_home(home);
@@ -589,47 +779,33 @@ fn spawn_harness(
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
-    // Forward the server's stderr to our own so startup failures are visible.
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => eprintln!("{}", runtime_log_line(line.trim_end())),
-            }
-        }
+    // Startup diagnostics must survive the console-less Windows build.
+    write_backend_log(&format!(
+        "--- dsh web started: {}",
+        runtime.dsh_entry.display()
+    ));
+
+    // Forward the server's stderr to the log so startup failures stay visible.
+    let recent = Arc::new(Mutex::new(Vec::new()));
+    std::thread::spawn({
+        let recent = Arc::clone(&recent);
+        move || forward_backend_stream(stderr, "[harness:stderr] ", recent, None)
     });
 
     let (output_tx, output_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let trimmed = line.trim_end().to_owned();
-                    if !trimmed.is_empty() {
-                        eprintln!("[harness] {}", runtime_log_line(&trimmed));
-                    }
-                    let _ = output_tx.send(Ok(trimmed));
-                }
-                Err(error) => {
-                    let _ = output_tx.send(Err(error));
-                    break;
-                }
-            }
-        }
+    std::thread::spawn({
+        let recent = Arc::clone(&recent);
+        move || forward_backend_stream(stdout, "[harness] ", recent, Some(output_tx))
     });
 
     match wait_for_startup_url(&output_rx, STARTUP_TIMEOUT) {
-        Ok(url) => Ok((child, url)),
+        Ok(url) => Ok((child, url, recent)),
         Err(error) => {
             terminate_command(&mut child);
-            Err(error.into())
+            Err(
+                backend_failure_message(&error.to_string(), &recent, backend_log_path().as_deref())
+                    .into(),
+            )
         }
     }
 }
@@ -650,7 +826,7 @@ fn backend_supervisor(
             break;
         }
         match spawn_harness(&resource_dir, &home, &shell_env) {
-            Ok((mut child, url)) => {
+            Ok((mut child, url, recent)) => {
                 let started_at = Instant::now();
                 let pid = child.id();
                 *state.child_pid.lock().unwrap() = Some(pid);
@@ -695,18 +871,26 @@ fn backend_supervisor(
                     Err(error) => format!("failed to wait for backend process: {error}"),
                 };
                 eprintln!("[harness] {detail} ({failures}); restarting");
+                write_backend_log(&format!("[harness] {detail} ({failures}); restarting"));
                 if failures >= MAX_RESTART_ATTEMPTS && !error_reported {
                     error_reported = true;
-                    show_backend_error(&app, &detail);
+                    show_backend_error(
+                        &app,
+                        &backend_failure_message(&detail, &recent, backend_log_path().as_deref()),
+                    );
                 }
                 std::thread::sleep(restart_delay(failures));
             }
             Err(e) => {
                 failures = next_failure_count(failures, None);
-                eprintln!("[harness] backend spawn failed ({failures}): {e}");
+                let detail = e.to_string();
+                eprintln!("[harness] backend spawn failed ({failures}): {detail}");
+                write_backend_log(&format!(
+                    "[harness] backend spawn failed ({failures}): {detail}"
+                ));
                 if failures >= MAX_RESTART_ATTEMPTS && !error_reported {
                     error_reported = true;
-                    show_backend_error(&app, &e);
+                    show_backend_error(&app, &detail);
                 }
                 std::thread::sleep(restart_delay(failures));
             }
@@ -1625,6 +1809,10 @@ fn main() {
     let menu_slot = app_menu_slot.clone();
     let setup_slot = app_menu_slot;
 
+    // Record the log location before any runtime work so startup failures are
+    // diagnosable from the installed app, which has no console on Windows.
+    initialize_backend_log();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A second launch was requested: re-focus the existing instance.
@@ -1651,6 +1839,7 @@ fn main() {
 
             let resource_dir = app.path().resource_dir()?;
             let home = app.path().home_dir()?;
+            finalize_backend_log_directory(app.path().app_local_data_dir().ok());
             let state = Arc::new(BackendState::new());
             app.manage(state.clone());
 
@@ -2008,6 +2197,180 @@ INVALID-KEY=value\0";
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(started_at.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stream_reader_survives_non_utf8_output_before_the_url() {
+        let mut bytes = Vec::new();
+        // A GBK-encoded diagnostic from a Windows console code page, followed by
+        // the ASCII boot line the supervisor needs.
+        bytes.extend_from_slice(&[0xd6, 0xd0, 0xce, 0xc4, 0x0a]);
+        bytes.extend_from_slice(b"dsh web: http://127.0.0.1:3080\n");
+        let mut lines = Vec::new();
+
+        read_stream_lines(std::io::Cursor::new(bytes), |line| lines.push(line));
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            parse_url(&lines[1]).unwrap().as_str(),
+            "http://127.0.0.1:3080/"
+        );
+    }
+
+    #[test]
+    fn stream_reader_keeps_a_final_unterminated_line() {
+        let mut lines = Vec::new();
+
+        read_stream_lines(
+            std::io::Cursor::new(b"dsh web: http://127.0.0.1:9"),
+            |line| lines.push(line),
+        );
+
+        assert_eq!(lines, vec!["dsh web: http://127.0.0.1:9".to_owned()]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stream_reader_forwards_output_while_the_child_stays_alive() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "printf '\\326\\320\\316\\304\\n'; printf 'dsh web: http://127.0.0.1:3080\\n'; sleep 5"])
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (output_tx, output_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            forward_backend_stream(
+                stdout,
+                "[harness] ",
+                Arc::new(Mutex::new(Vec::new())),
+                Some(output_tx),
+            )
+        });
+
+        let url = wait_for_startup_url(&output_rx, Duration::from_secs(10)).unwrap();
+
+        assert_eq!(url.as_str(), "http://127.0.0.1:3080/");
+        terminate_command(&mut child);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn failure_message_carries_output_tail_and_log_location() {
+        let recent = Mutex::new(vec![
+            "first".to_owned(),
+            "second".to_owned(),
+            "third".to_owned(),
+        ]);
+
+        let message = backend_failure_message(
+            "dsh web exited before reporting its URL",
+            &recent,
+            Some(Path::new("/tmp/backend.log")),
+        );
+
+        assert!(message.starts_with("dsh web exited before reporting its URL"));
+        assert!(message.contains("second"));
+        assert!(message.contains("third"));
+        assert!(message.contains("/tmp/backend.log"));
+    }
+
+    #[test]
+    fn failure_message_truncates_very_long_output_lines() {
+        let recent = Mutex::new(vec!["x".repeat(ERROR_DIALOG_LINE_LIMIT + 50)]);
+
+        let message = backend_failure_message("failed", &recent, None);
+
+        assert!(message.ends_with('…'));
+        assert!(message.chars().count() < ERROR_DIALOG_LINE_LIMIT + 64);
+    }
+
+    #[test]
+    fn oversized_backend_logs_rotate_before_growing() {
+        let directory =
+            std::env::temp_dir().join(format!("openharness-log-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("backend.log");
+        fs::write(&path, vec![b'x'; (BACKEND_LOG_LIMIT + 1) as usize]).unwrap();
+
+        rotate_backend_log(&path);
+
+        assert!(!path.exists());
+        assert!(directory.join("backend.log.1").exists());
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn startup_failures_reach_the_backend_log_and_the_dialog() {
+        let directory =
+            std::env::temp_dir().join(format!("openharness-startup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        install_backend_log(directory.clone());
+        let log_path = backend_log_path().expect("the log path was just installed");
+        assert!(log_path.starts_with(&directory));
+
+        // A backend that dies on its first read is the startup failure users hit:
+        // nothing on stdout, an error on stderr, and no URL.
+        let mut command = Command::new("node");
+        command
+            .args(["-e", "process.stderr.write('boom\\n'); process.exit(3)"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let recent = Arc::new(Mutex::new(Vec::new()));
+        let (output_tx, output_rx) = mpsc::channel();
+        let readers = [
+            std::thread::spawn({
+                let recent = Arc::clone(&recent);
+                move || forward_backend_stream(stderr, "[harness:stderr] ", recent, None)
+            }),
+            std::thread::spawn({
+                let recent = Arc::clone(&recent);
+                move || {
+                    forward_backend_stream(stdout, "[harness] ", recent, Some(output_tx));
+                }
+            }),
+        ];
+
+        let error = wait_for_startup_url(&output_rx, Duration::from_secs(20)).unwrap_err();
+
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        child.wait().unwrap();
+        let logged = fs::read_to_string(&log_path).unwrap();
+        assert!(logged.contains("[harness:stderr] boom"), "{logged}");
+        let message = backend_failure_message(&error.to_string(), &recent, Some(&log_path));
+        assert!(message.contains("boom"), "{message}");
+        assert!(
+            message.contains(&log_path.display().to_string()),
+            "{message}"
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn log_directory_prefers_the_platform_state_directory() {
+        assert_eq!(
+            resolve_log_directory(
+                Some(OsString::from("/Local")),
+                Some(OsString::from("/state")),
+                Some(OsString::from("/home/user"))
+            ),
+            PathBuf::from("/Local/OpenHarness/logs")
+        );
+        assert_eq!(
+            resolve_log_directory(None, Some(OsString::from("/state")), None),
+            PathBuf::from("/state/OpenHarness/logs")
+        );
+        assert_eq!(
+            resolve_log_directory(None, None, Some(OsString::from("/home/user"))),
+            PathBuf::from("/home/user/.local/state/OpenHarness/logs")
+        );
+        assert!(resolve_log_directory(None, None, None).ends_with("OpenHarness/logs"));
     }
 
     #[test]

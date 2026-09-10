@@ -198,6 +198,15 @@ existing update menu still targets upstream OpenHarness releases; use the fork's
 offline installer to retain these changes. Target-machine WebView rendering and
 internal network/provider configuration need verification on that machine.
 
+When the backend fails to start, the error dialog reports the backend's last
+output lines and the path of `backend.log`, which records every `dsh web`
+startup with its boot URL redacted. The log lives beside the app's data:
+`%LOCALAPPDATA%\team.MicroSpotlight.OpenHarness\OpenHarness\logs` on Windows,
+`~/Library/Application Support/team.MicroSpotlight.OpenHarness/OpenHarness/logs`
+on macOS, and `$XDG_STATE_HOME/OpenHarness/logs` on Linux. Attach that file when
+reporting a startup failure; the windowless Windows build has no console output
+to read otherwise.
+
 For local development:
 
 ```sh
