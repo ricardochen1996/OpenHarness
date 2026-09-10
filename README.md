@@ -172,6 +172,32 @@ bun run build
 
 Build artifacts are written under `src-tauri/target/release/bundle/`.
 
+### Windows offline builds in a fork
+
+The **Build Windows offline installer** Actions workflow builds Windows x64
+on pushes to `codex/windows-runtime-update` or by manual dispatch. It requires
+no release signing secrets and does not publish a GitHub Release. Its NSIS
+installer includes the WebView2 offline installer. Build artifacts are retained
+for 30 days and include a SHA256 checksum and `BUILD.txt` identifying the source
+commit and bundled DSH version.
+
+The workflow runs JavaScript and Rust tests, installs the generated package in
+a directory containing spaces and Chinese characters, and smoke-tests its
+installed runtime with an isolated temporary `DSH_HOME`. The smoke test checks
+the published CLI entry, native modules, managed plugin imports, authentication
+redirect, and branded Web UI. Run it locally with
+`node scripts/smoke-runtime.mjs /absolute/path/to/runtime`.
+
+To update an offline Windows machine, copy the artifact from the Mac, extract
+it, and compare `Get-FileHash .\OpenHarness_windows_x64_offline-setup.exe -Algorithm SHA256`
+with the supplied checksum. Quit OpenHarness, back up `%USERPROFILE%\.dsh`
+(or the custom `DSH_HOME`), and run the installer over the existing installation.
+Keep the previous installer and data backup for rollback. The build is unsigned;
+installation remains subject to the machine's application policies. The app's
+existing update menu still targets upstream OpenHarness releases; use the fork's
+offline installer to retain these changes. Target-machine WebView rendering and
+internal network/provider configuration need verification on that machine.
+
 For local development:
 
 ```sh

@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolveDshEntry } from "./runtime-entry.mjs";
 
 const NODE_VERSION = "v24.19.0";
 
@@ -142,6 +143,7 @@ async function runtimeManifestHash(target, bunVersion) {
     join(MANIFEST_DIR, "native-bridge"),
     join(MANIFEST_DIR, "pnpm-launcher"),
     join(PROJECT_ROOT, "scripts", "brand-runtime.mjs"),
+    join(PROJECT_ROOT, "scripts", "runtime-entry.mjs"),
     join(PROJECT_ROOT, "assets", "openharness-icon.png"),
   ];
   const files = (await Promise.all(inputs.map(collectFiles))).flat().sort();
@@ -269,6 +271,7 @@ async function filterRuntimeForTarget(target) {
 }
 
 async function verifyRuntime(target, nodePath) {
+  await resolveDshEntry(DSH_DIR);
   for (const file of requiredPortableRuntimeFiles()) {
     const absolute = join(DSH_DIR, file);
     if (!(await fileExists(absolute))) {
@@ -360,8 +363,8 @@ async function installDsh(target, nodePath) {
   const bunVersion = run("bun", ["--version"], { capture: true });
   const expectedHash = await runtimeManifestHash(target, bunVersion);
   const installedHash = await readFile(RUNTIME_STAMP, "utf8").catch(() => "");
-  const binPath = join(DSH_DIR, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
-  const cacheMatches = (await fileExists(binPath)) && installedHash.trim() === expectedHash;
+  const binPath = await resolveDshEntry(DSH_DIR).catch(() => undefined);
+  const cacheMatches = Boolean(binPath) && installedHash.trim() === expectedHash;
 
   if (cacheMatches) {
     console.log(`>> DSH runtime for ${target.key} matches the lockfile`);

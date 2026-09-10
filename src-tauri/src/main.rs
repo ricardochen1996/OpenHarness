@@ -34,7 +34,9 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 use url::{Host, Url};
 
+mod runtime_paths;
 mod status_bar;
+use runtime_paths::{resolve_runtime, RuntimePaths};
 
 use status_bar::{select_sessions, validate_snapshot, SessionMenuEntry, SessionMenuSnapshot};
 #[cfg(test)]
@@ -214,6 +216,15 @@ fn parse_url(line: &str) -> Option<Url> {
     }
 }
 
+fn runtime_log_line(line: &str) -> &str {
+    // Newer DSH versions put a browser authentication token in the boot URL.
+    if line.contains("dsh web: ") {
+        "dsh web: [startup URL omitted]"
+    } else {
+        line
+    }
+}
+
 fn wait_for_startup_url(
     output: &mpsc::Receiver<Result<String, std::io::Error>>,
     timeout: Duration,
@@ -266,64 +277,6 @@ fn restart_delay(failures: u32) -> Duration {
 
 fn is_managed_restart_code(code: Option<i32>) -> bool {
     code == Some(MANAGED_RESTART_EXIT_CODE)
-}
-
-struct RuntimePaths {
-    root: PathBuf,
-    node: PathBuf,
-    dsh_entry: PathBuf,
-    patch: PathBuf,
-    find_plugin_patch: PathBuf,
-    package_manager_bin: PathBuf,
-}
-
-/// Locate the bundled Node binary, `dsh` entry script, native bridge patch,
-/// and package manager launcher inside the app
-/// resources. Handles both the directory-preserving and directory-flattening
-/// ways Tauri can lay out a bundled `runtime` resource.
-fn resolve_runtime(resource_dir: &Path) -> Result<RuntimePaths, String> {
-    let bases = [resource_dir.join("runtime"), resource_dir.to_path_buf()];
-    for base in bases {
-        let node = base.join(if cfg!(target_os = "windows") {
-            "node.exe"
-        } else {
-            "node"
-        });
-        let bin = base
-            .join("dsh")
-            .join("node_modules")
-            .join("@deepseek-ai")
-            .join("dsh")
-            .join("lib")
-            .join("bin.js");
-        let patch = base.join("dsh").join("openharness.patch.yml");
-        let find_plugin_patch = base.join("dsh").join("openharness-find.patch.yml");
-        let package_manager_bin = base.join("dsh").join("openharness-bin");
-        let package_manager = package_manager_bin.join(if cfg!(target_os = "windows") {
-            "pnpm.cmd"
-        } else {
-            "pnpm"
-        });
-        if node.exists()
-            && bin.exists()
-            && patch.exists()
-            && find_plugin_patch.exists()
-            && package_manager.exists()
-        {
-            return Ok(RuntimePaths {
-                root: base,
-                node,
-                dsh_entry: bin,
-                patch,
-                find_plugin_patch,
-                package_manager_bin,
-            });
-        }
-    }
-    Err(format!(
-        "bundled runtime not found under {} (expected Node, DSH, the OpenHarness patch, and the pnpm launcher)",
-        resource_dir.display()
-    ))
 }
 
 fn read_bounded<R: Read>(mut reader: R, limit: usize) -> Result<Vec<u8>, std::io::Error> {
@@ -577,7 +530,7 @@ fn configure_harness_args(
     if !profile_has_find_plugin {
         command.arg("--patch").arg(&runtime.find_plugin_patch);
     }
-    command.args(["--port", "0", "--no-open"]);
+    command.args(["--host", "127.0.0.1", "--port", "0", "--no-open"]);
 }
 
 /// Spawn the DSH web server and block until it reports its canonical URL.
@@ -644,7 +597,7 @@ fn spawn_harness(
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) | Err(_) => break,
-                Ok(_) => eprint!("{line}"),
+                Ok(_) => eprintln!("{}", runtime_log_line(line.trim_end())),
             }
         }
     });
@@ -660,7 +613,7 @@ fn spawn_harness(
                 Ok(_) => {
                     let trimmed = line.trim_end().to_owned();
                     if !trimmed.is_empty() {
-                        eprintln!("[harness] {trimmed}");
+                        eprintln!("[harness] {}", runtime_log_line(&trimmed));
                     }
                     let _ = output_tx.send(Ok(trimmed));
                 }
@@ -1775,6 +1728,14 @@ fn main() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn preserves_browser_authentication_without_logging_launch_tokens() {
+        let line = "dsh web: http://127.0.0.1:3080/?token=test-secret";
+        assert_eq!(parse_url(line).unwrap().query(), Some("token=test-secret"));
+        assert!(!runtime_log_line(line).contains("test-secret"));
+        assert_eq!(runtime_log_line("plugin activated"), "plugin activated");
+    }
+
     fn menu_session(
         id: &str,
         updated_at: u64,
@@ -1985,6 +1946,8 @@ INVALID-KEY=value\0";
                 "/app/runtime/dsh/openharness.patch.yml",
                 "--patch",
                 "/app/runtime/dsh/openharness-find.patch.yml",
+                "--host",
+                "127.0.0.1",
                 "--port",
                 "0",
                 "--no-open",

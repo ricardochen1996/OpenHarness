@@ -181,14 +181,14 @@ staticHost = replaceOnce(
 );
 write("dsh-host-frontend-static/lib/index.js", staticHost);
 
-let cordisPreset = read("dsh/config/agent-presets/cordis/agent.cordis.yml");
+let cordisPreset = read("dsh-agent-presets/presets/cordis/agent.cordis.yml");
 cordisPreset = replaceOnce(
   cordisPreset,
   "running on the DeepSeek Harness.",
   "running in OpenHarness on the DeepSeek Harness runtime.",
   "Cordis preset product identity",
 );
-write("dsh/config/agent-presets/cordis/agent.cordis.yml", cordisPreset);
+write("dsh-agent-presets/presets/cordis/agent.cordis.yml", cordisPreset);
 
 const indexPath = resolve(frontendDist, "index.html");
 let indexHtml = readFileSync(indexPath, "utf8");
