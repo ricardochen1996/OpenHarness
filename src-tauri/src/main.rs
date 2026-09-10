@@ -1994,6 +1994,7 @@ INVALID-KEY=value\0";
     }
 
     #[test]
+    #[cfg(unix)]
     fn shell_environment_command_honors_timeout() {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "sleep 30 & wait"]);

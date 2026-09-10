@@ -161,7 +161,9 @@ mod tests {
             .join("runtime/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js");
         fs::remove_file(&entry).unwrap();
         let error = resolve_runtime_for_platform(&fixture.0, true).unwrap_err();
-        assert!(error.contains(&entry.display().to_string()));
+        assert!(error
+            .replace('\\', "/")
+            .contains(&entry.display().to_string().replace('\\', "/")));
         fs::create_dir(&entry).unwrap();
         assert!(resolve_runtime_for_platform(&fixture.0, true).is_err());
     }
