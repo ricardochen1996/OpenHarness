@@ -79,9 +79,10 @@ jobs:
           # resource directory, spawns the bundled runtime, and reports the URL.
           $ErrorActionPreference = 'Stop'
           $installDir = Join-Path $env:RUNNER_TEMP 'OpenHarness 安装 测试'
-          $home = Join-Path $env:RUNNER_TEMP 'OpenHarness dsh home'
-          $env:DSH_HOME = $home
-          New-Item -ItemType Directory -Force $home | Out-Null
+          # PowerShell treats $HOME as read-only, so use a distinct name.
+          $dshHome = Join-Path $env:RUNNER_TEMP 'OpenHarness dsh home'
+          $env:DSH_HOME = $dshHome
+          New-Item -ItemType Directory -Force $dshHome | Out-Null
           $log = Join-Path $env:LOCALAPPDATA 'team.MicroSpotlight.OpenHarness\OpenHarness\logs\backend.log'
           Remove-Item $log -ErrorAction SilentlyContinue
           $app = Start-Process -FilePath (Join-Path $installDir 'OpenHarness.exe') -PassThru
