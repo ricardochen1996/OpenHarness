@@ -103,7 +103,10 @@ jobs:
             throw 'The installed app logged a backend startup failure'
           }
           Get-Process OpenHarness -ErrorAction SilentlyContinue | Stop-Process -Force
-          Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+          # Only the bundled runtime, never the runner's own Node processes.
+          Get-Process node -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -and $_.Path.StartsWith($installDir, 'OrdinalIgnoreCase') } |
+            Stop-Process -Force
           Write-Host 'PASS: the installed app started its bundled runtime'
       - name: Collect verified installer
         shell: pwsh
