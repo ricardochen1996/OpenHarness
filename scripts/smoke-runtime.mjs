@@ -2,10 +2,21 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, join, resolve, win32 } from "node:path";
 import { resolveDshEntry } from "./runtime-entry.mjs";
 
-const root = resolve(process.argv[2] ?? "src-tauri/runtime");
+// Windows installers report verbatim (`\\?\C:\...`) resource paths, which Node
+// cannot load as a module entry. Interpret Windows paths with Windows semantics
+// so this script can prove the conversion, and reproduce the failure off-Windows.
+const argument = process.argv[2] ?? "src-tauri/runtime";
+const windowsArgument = /^[A-Za-z]:[\\/]/.test(argument) || argument.startsWith("\\\\");
+const normalize = (value) =>
+  value.startsWith("\\\\?\\UNC\\")
+    ? `\\\\${value.slice(8)}`
+    : value.startsWith("\\\\?\\")
+      ? value.slice(4)
+      : value;
+const root = windowsArgument ? normalize(win32.resolve(argument)) : resolve(argument);
 const node = join(root, process.platform === "win32" ? "node.exe" : "node");
 const dsh = join(root, "dsh");
 const entry = await resolveDshEntry(dsh);

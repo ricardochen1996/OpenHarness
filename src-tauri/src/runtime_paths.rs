@@ -36,6 +36,25 @@ fn package_entry(package: &Path) -> Result<PathBuf, String> {
     Ok(package.join(entry))
 }
 
+/// Windows hands the app verbatim (`\\?\`) resource paths. Rust reads them
+/// happily, but Node's CommonJS loader does not: it treats the prefix as a path
+/// segment and dies with `EISDIR: illegal operation on a directory, lstat 'C:'`
+/// before the server can report its URL. Every path forwarded to the child
+/// process therefore uses the plain form.
+fn child_path(path: &Path, windows: bool) -> PathBuf {
+    if !windows {
+        return path.to_path_buf();
+    }
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(plain) => PathBuf::from(plain),
+        None => path.to_path_buf(),
+    }
+}
+
 pub(crate) fn resolve_runtime(resource_dir: &Path) -> Result<RuntimePaths, String> {
     resolve_runtime_for_platform(resource_dir, cfg!(target_os = "windows"))
 }
@@ -45,6 +64,7 @@ fn resolve_runtime_for_platform(
     windows: bool,
 ) -> Result<RuntimePaths, String> {
     let mut errors = Vec::new();
+    let resource_dir = child_path(resource_dir, windows);
     // Tauri resource mappings can preserve the runtime directory or flatten it.
     for base in [resource_dir.join("runtime"), resource_dir.to_path_buf()] {
         let node = base.join(if windows { "node.exe" } else { "node" });
@@ -152,6 +172,30 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn windows_paths_handed_to_the_child_drop_the_verbatim_prefix() {
+        assert_eq!(
+            child_path(
+                Path::new(r"\\?\C:\Users\Administrator\AppData\Local\OpenHarness"),
+                true
+            ),
+            PathBuf::from(r"C:\Users\Administrator\AppData\Local\OpenHarness")
+        );
+        assert_eq!(
+            child_path(Path::new(r"\\?\UNC\server\share\OpenHarness"), true),
+            PathBuf::from(r"\\server\share\OpenHarness")
+        );
+        assert_eq!(
+            child_path(Path::new(r"C:\Program Files\OpenHarness"), true),
+            PathBuf::from(r"C:\Program Files\OpenHarness")
+        );
+        // POSIX paths keep any backslashes they legitimately contain.
+        assert_eq!(
+            child_path(Path::new(r"/opt/\\?\runtime"), false),
+            PathBuf::from(r"/opt/\\?\runtime")
+        );
+    }
+
     #[test]
     fn reports_exact_missing_windows_entry_and_rejects_directories() {
         let fixture = Fixture::new();

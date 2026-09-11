@@ -60,6 +60,50 @@ jobs:
           if (-not (Test-Path (Join-Path $installDir 'OpenHarness.exe'))) { throw 'Installed desktop executable is missing' }
           node scripts/smoke-runtime.mjs (Join-Path $installDir 'runtime')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke test the verbatim resource path form
+        shell: pwsh
+        run: |
+          # Tauri's resource_dir() is a verbatim path on Windows. Node cannot
+          # resolve `\\?\C:\...` as a module entry, so the packaged runtime must
+          # be shown to boot when given exactly that form.
+          $ErrorActionPreference = 'Stop'
+          $installDir = Join-Path $env:RUNNER_TEMP 'OpenHarness 安装 测试'
+          $verbatim = Join-Path '\\?\' (Join-Path $installDir 'runtime')
+          if (-not $verbatim.StartsWith('\\?\')) { throw "Not a verbatim path: $verbatim" }
+          node scripts/smoke-runtime.mjs $verbatim
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Launch installed app with an isolated DSH_HOME
+        shell: pwsh
+        run: |
+          # Exercises the real code path end to end: the host resolves its own
+          # resource directory, spawns the bundled runtime, and reports the URL.
+          $ErrorActionPreference = 'Stop'
+          $installDir = Join-Path $env:RUNNER_TEMP 'OpenHarness 安装 测试'
+          $home = Join-Path $env:RUNNER_TEMP 'OpenHarness dsh home'
+          $env:DSH_HOME = $home
+          New-Item -ItemType Directory -Force $home | Out-Null
+          $log = Join-Path $env:LOCALAPPDATA 'team.MicroSpotlight.OpenHarness\OpenHarness\logs\backend.log'
+          Remove-Item $log -ErrorAction SilentlyContinue
+          $app = Start-Process -FilePath (Join-Path $installDir 'OpenHarness.exe') -PassThru
+          $deadline = (Get-Date).AddSeconds(75)
+          while ((Get-Date) -lt $deadline) {
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'dsh web: \[startup URL omitted\]' -Quiet)) { break }
+            if ($app.HasExited) { break }
+            Start-Sleep -Seconds 3
+          }
+          $logged = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
+          if ($logged -notmatch 'dsh web: \[startup URL omitted\]') {
+            Write-Host "--- backend.log ---"
+            Write-Host $logged
+            throw 'The installed app never reported a backend URL'
+          }
+          if ($logged -match 'EISDIR|before reporting its URL|backend spawn failed') {
+            Write-Host $logged
+            throw 'The installed app logged a backend startup failure'
+          }
+          Get-Process OpenHarness -ErrorAction SilentlyContinue | Stop-Process -Force
+          Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host 'PASS: the installed app started its bundled runtime'
       - name: Collect verified installer
         shell: pwsh
         run: |

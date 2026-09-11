@@ -84,6 +84,12 @@ change also requires the relevant Tauri build or CI job.
 - Keep runtime telemetry disabled from the desktop launcher.
 - Use the managed Node.js and pnpm paths for plugin operations. Do not silently
   depend on a user's global Node.js or package-manager installation.
+- Hand the child process plain paths on Windows. Tauri's `resource_dir()` is a
+  verbatim (`\\?\C:\...`) path, which Rust reads but Node's CommonJS loader
+  cannot resolve as an entry: it fails with
+  `EISDIR: illegal operation on a directory, lstat 'C:'` and exits before
+  reporting its URL. Convert every path passed as an argument or environment
+  value, and keep a smoke check for the verbatim form.
 - Preserve single-instance behavior, bounded restart backoff, child-process
   cleanup, and full process-tree cancellation.
 - Treat the `web` profile and `~/.dsh` as user-owned persistent data. Tests and
