@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -6,6 +9,7 @@ import {
   incompatibleNativeArtifactPaths,
   nativePackagePaths,
   oversizedBundledPaths,
+  pruneForeignDshPackages,
   requiredPortableRuntimeFiles,
   resolveRuntimeTarget,
 } from "./setup-runtime.mjs";
@@ -101,4 +105,53 @@ test("requires the plugin discovery and package manager runtime files", () => {
     "node_modules/@microspotlight/openharness-find-plugin/lib/client.js",
     "node_modules/@microspotlight/openharness-find-plugin/cordis.patch.yml",
   ]);
+});
+
+test("prunes foreign DSH copies left by stale plugin peers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openharness-prune-"));
+  const nodeModules = join(root, "node_modules");
+  const writePackage = async (path, name, version) => {
+    const directory = join(nodeModules, path);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "package.json"), JSON.stringify({ name, version }));
+  };
+  try {
+    await writePackage("@deepseek-ai/dsh-tools", "@deepseek-ai/dsh-tools", "0.2.2-rc.1");
+    await writePackage(
+      "@deepseek-ai/dsh-tools/node_modules/@deepseek-ai/dsh-scope",
+      "@deepseek-ai/dsh-scope",
+      "0.1.0-rc.6",
+    );
+    await writePackage(
+      "@deepseek-ai/dsh-tools/node_modules/@deepseek-ai/dsh",
+      "@deepseek-ai/dsh",
+      "0.1.0-rc.8",
+    );
+    await writePackage(
+      "@deepseek-ai/dsh-client-runtime",
+      "@deepseek-ai/dsh-client-runtime",
+      "0.1.0-rc.6",
+    );
+    await writePackage(
+      "@deepseek-ai/dsh-client-runtime/node_modules/@deepseek-ai/dsh-agent",
+      "@deepseek-ai/dsh-agent",
+      "0.1.0-rc.6",
+    );
+    await writePackage("@other/keep", "@other/keep", "1.0.0");
+
+    await pruneForeignDshPackages(nodeModules, "0.2.2-rc.1");
+
+    for (const removed of [
+      "@deepseek-ai/dsh-client-runtime",
+      "@deepseek-ai/dsh-tools/node_modules/@deepseek-ai/dsh-scope",
+      "@deepseek-ai/dsh-tools/node_modules/@deepseek-ai/dsh",
+    ]) {
+      await assert.rejects(stat(join(nodeModules, removed)), { code: "ENOENT" });
+    }
+    for (const kept of ["@deepseek-ai/dsh-tools", "@other/keep"]) {
+      assert.ok((await stat(join(nodeModules, kept))).isDirectory());
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

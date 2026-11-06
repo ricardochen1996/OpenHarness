@@ -103,11 +103,13 @@ change also requires the relevant Tauri build or CI job.
    changes, not only API or type changes.
 2. Update the exact `@deepseek-ai/dsh` version in `runtime/package.json` and
    regenerate `runtime/bun.lock` with Bun.
-3. Re-derive the `overrides` block in `runtime/package.json`. Upstream packages
-   that still pin an older `0.1.x-rc` range resolve to nested copies, and the
-   resulting `node_modules` depth breaks the Windows installer long before it
-   breaks anything else. Pin every duplicated `@deepseek-ai/dsh-*` package to
-   the release being adopted, and drop entries upstream has since aligned.
+3. Re-check the `@deepseek-ai/dsh-*` closure. Upstream 0.2 pins its packages
+   exactly, so `runtime/package.json` needs no `overrides` block;
+   `scripts/setup-runtime.mjs` prunes any DSH package that does not match the
+   adopted release. Stale peers declared by the Find Plugin would otherwise
+   nest an old `0.1.x` tree, and the resulting `node_modules` depth breaks the
+   Windows installer long before it breaks anything else. Reintroduce targeted
+   overrides only if upstream ships a conflicting range.
 4. Rebuild or validate the managed runtime with `bun run setup:runtime`.
 5. Verify OpenHarness branding, startup URL detection, Native Bridge loading,
    plugin discovery, and the no-external-browser invariant.

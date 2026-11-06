@@ -72,7 +72,7 @@ try {
   // Like a WebView, retain the cookie issued by the launch-token redirect.
   const bootstrap = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(10000) });
   assert.equal(bootstrap.status, 303);
-  assert.equal(bootstrap.headers.get("location"), "/");
+  assert.equal(new URL(bootstrap.headers.get("location"), url).pathname, "/");
   const cookie = bootstrap.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
   assert.ok(cookie, "Launch URL must issue a browser authentication cookie");
   const response = await fetch(new URL("/", url), { headers: { cookie }, signal: AbortSignal.timeout(10000) });

@@ -328,6 +328,46 @@ async function verifyRuntime(target, nodePath) {
   }
 }
 
+// The Find Plugin still declares peers against 0.1.0-rc.6. Bun installs those
+// stale copies when no matching package exists, and their nested 0.1.x tree
+// breaks the Windows path budget. DSH 0.2 pins its own closure exactly, so any
+// DSH package that does not match the adopted release is a foreign copy.
+export async function pruneForeignDshPackages(nodeModulesDirectory, expectedVersion) {
+  const stale = [];
+  const walk = async (directory) => {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === ".bin") continue;
+      const path = join(directory, entry.name);
+      if (entry.name === "node_modules" || entry.name.startsWith("@")) {
+        await walk(path);
+        continue;
+      }
+      const manifest = await readFile(join(path, "package.json"), "utf8")
+        .then((content) => JSON.parse(content))
+        .catch(() => undefined);
+      const isDshPackage =
+        manifest?.name === "@deepseek-ai/dsh" || manifest?.name?.startsWith("@deepseek-ai/dsh-");
+      if (isDshPackage && manifest.version !== expectedVersion) {
+        stale.push(path);
+        continue;
+      }
+      await walk(join(path, "node_modules"));
+    }
+  };
+  await walk(nodeModulesDirectory);
+  stale.sort((left, right) => right.length - left.length);
+  for (const path of stale) await rm(path, { recursive: true, force: true });
+  if (stale.length > 0) {
+    console.log(`>> Removed ${stale.length} foreign DSH package copies for ${expectedVersion}`);
+  }
+}
+
 async function assembleDsh(target) {
   await rm(DSH_DIR, { recursive: true, force: true });
   await mkdir(DSH_DIR, { recursive: true });
@@ -350,6 +390,10 @@ async function assembleDsh(target) {
     `--os=${target.os}`,
     "--registry=https://registry.npmjs.org",
   ], { cwd: DSH_DIR });
+  const dshManifest = JSON.parse(
+    await readFile(join(DSH_DIR, "node_modules", "@deepseek-ai", "dsh", "package.json"), "utf8"),
+  );
+  await pruneForeignDshPackages(join(DSH_DIR, "node_modules"), dshManifest.version);
 }
 
 async function finalizeDsh(target, nodePath, expectedHash) {
