@@ -110,6 +110,28 @@ entryBundle = replaceBundledExport(
 );
 writeFileSync(entryBundlePath, entryBundle);
 
+// The published Find Plugin 0.1.0 was built against 0.1 client icons. DSH 0.2
+// renamed them without changing the Button API; map the four icons it renders
+// so the plugin settings page keeps working until the plugin ships an update.
+const findPluginClientPath = resolve(
+  packagesRoot,
+  "../@microspotlight/openharness-find-plugin/lib/client.js",
+);
+let findPluginClient = readFileSync(findPluginClientPath, "utf8");
+for (const [legacy, current] of [
+  ["IconDownloadOutline16", "IconDownloadOutlineMedium"],
+  ["IconRefreshOutline16", "IconRefreshOutlineMedium"],
+  ["IconRightUpOutline14", "IconRightUpOutlineMedium"],
+  ["IconSearchOutline16", "IconSearchOutlineMedium"],
+]) {
+  if (!findPluginClient.includes(legacy)) continue;
+  if (!entryBundle.includes(`${current}:`)) {
+    throw new Error(`OpenHarness runtime branding: missing ${current} for the Find Plugin`);
+  }
+  findPluginClient = findPluginClient.replaceAll(legacy, current);
+}
+writeFileSync(findPluginClientPath, findPluginClient);
+
 const openHarnessChineseWelcome = "OpenHarness 是由 MicroSpotlight 独立开发的桌面应用。内置的 DeepSeek Harness 上游运行时组件单独采用 MIT License；OpenHarness 原创代码采用 Apache License 2.0。";
 const openHarnessEnglishWelcome = "OpenHarness is an independent desktop app developed by MicroSpotlight. Its bundled DeepSeek Harness upstream runtime is separately licensed under MIT; OpenHarness original code is licensed under Apache License 2.0.";
 
