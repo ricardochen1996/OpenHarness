@@ -716,7 +716,10 @@ fn find_system_browser() -> Option<PathBuf> {
             ("PROGRAMFILES", r"Google\Chrome\Application\chrome.exe"),
             ("PROGRAMFILES(X86)", r"Google\Chrome\Application\chrome.exe"),
             ("LOCALAPPDATA", r"Google\Chrome\Application\chrome.exe"),
-            ("PROGRAMFILES(X86)", r"Microsoft\Edge\Application\msedge.exe"),
+            (
+                "PROGRAMFILES(X86)",
+                r"Microsoft\Edge\Application\msedge.exe",
+            ),
             ("PROGRAMFILES", r"Microsoft\Edge\Application\msedge.exe"),
         ] {
             let Some(base) = std::env::var_os(variable) else {
@@ -816,7 +819,11 @@ fn spawn_harness(
             .env(
                 "OPENHARNESS_BROWSER_EXECUTABLE",
                 browser
-                    .map(|path| child_path(&path, cfg!(windows)).to_string_lossy().into_owned())
+                    .map(|path| {
+                        child_path(&path, cfg!(windows))
+                            .to_string_lossy()
+                            .into_owned()
+                    })
                     .unwrap_or_default(),
             )
             // The engine reads UTF-8 JavaScript with Python's default locale

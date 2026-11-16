@@ -88,9 +88,8 @@ fn resolve_runtime_for_platform(
         let patch = dsh.join("openharness.patch.yml");
         let find_plugin_patch = dsh.join("openharness-find.patch.yml");
         let browser_use_patch = dsh.join("openharness-browser-use.patch.yml");
-        let browser_use_entry = dsh.join(
-            "node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs",
-        );
+        let browser_use_entry =
+            dsh.join("node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs");
         let python = base.join(if windows {
             "python/python.exe"
         } else {
