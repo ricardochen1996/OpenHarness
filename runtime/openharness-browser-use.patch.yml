@@ -1,0 +1,24 @@
+- insert:
+    - id: openharness-browser-use
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: browser
+        transport: stdio
+        command: !!js process.env.OPENHARNESS_NODE_PATH
+        args:
+          - !!js process.env.OPENHARNESS_BROWSER_USE_MCP_ENTRY
+          - serve
+          - --mode
+          - launch
+          - --executable
+          - !!js process.env.OPENHARNESS_BROWSER_EXECUTABLE
+          - --profile
+          - openharness
+          - --no-jev
+        cwd: !!js process.env.OPENHARNESS_BROWSER_USE_MCP_CWD
+        env:
+          BROWSER_USE_MCP_HOME: !!js process.env.OPENHARNESS_BROWSER_USE_HOME
+          BROWSER_USE_MCP_PYTHON: !!js process.env.OPENHARNESS_PYTHON_PATH
+          BROWSER_USE_MCP_LOG_LEVEL: info
+        toolCallTimeoutMs: 120000
+        failOnStartupError: false

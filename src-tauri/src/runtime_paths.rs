@@ -6,9 +6,23 @@ pub(crate) struct RuntimePaths {
     pub root: PathBuf,
     pub node: PathBuf,
     pub dsh_entry: PathBuf,
+    pub dsh_dir: PathBuf,
     pub patch: PathBuf,
     pub find_plugin_patch: PathBuf,
+    pub browser_use_patch: PathBuf,
+    pub browser_use_entry: PathBuf,
+    pub python: PathBuf,
     pub package_manager_bin: PathBuf,
+}
+
+impl RuntimePaths {
+    /// The browser MCP is optional: it is only used when the runtime carries
+    /// the Python engine assembled for this platform.
+    pub(crate) fn browser_use_ready(&self) -> bool {
+        self.browser_use_patch.is_file()
+            && self.browser_use_entry.is_file()
+            && self.python.is_file()
+    }
 }
 
 fn package_entry(package: &Path) -> Result<PathBuf, String> {
@@ -41,7 +55,7 @@ fn package_entry(package: &Path) -> Result<PathBuf, String> {
 /// segment and dies with `EISDIR: illegal operation on a directory, lstat 'C:'`
 /// before the server can report its URL. Every path forwarded to the child
 /// process therefore uses the plain form.
-fn child_path(path: &Path, windows: bool) -> PathBuf {
+pub(crate) fn child_path(path: &Path, windows: bool) -> PathBuf {
     if !windows {
         return path.to_path_buf();
     }
@@ -73,6 +87,14 @@ fn resolve_runtime_for_platform(
         let entry = package_entry(&package);
         let patch = dsh.join("openharness.patch.yml");
         let find_plugin_patch = dsh.join("openharness-find.patch.yml");
+        let browser_use_patch = dsh.join("openharness-browser-use.patch.yml");
+        let browser_use_entry =
+            dsh.join("node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs");
+        let python = base.join(if windows {
+            "python/python.exe"
+        } else {
+            "python/bin/python3"
+        });
         let package_manager_bin = dsh.join("openharness-bin");
         let launcher = package_manager_bin.join(if windows { "pnpm.cmd" } else { "pnpm" });
         let mut missing = Vec::new();
@@ -91,8 +113,12 @@ fn resolve_runtime_for_platform(
                 root: base,
                 node,
                 dsh_entry: entry?,
+                dsh_dir: dsh,
                 patch,
                 find_plugin_patch,
+                browser_use_patch,
+                browser_use_entry,
+                python,
                 package_manager_bin,
             });
         }
@@ -211,6 +237,25 @@ mod tests {
         fs::create_dir(&entry).unwrap();
         assert!(resolve_runtime_for_platform(&fixture.0, true).is_err());
     }
+    #[test]
+    fn browser_mcp_is_ready_only_when_all_three_files_exist() {
+        let fixture = Fixture::new();
+        populate(&fixture.0, true, "lib/bin.js");
+        let paths = resolve_runtime_for_platform(&fixture.0, true).unwrap();
+        assert!(!paths.browser_use_ready());
+        for path in [
+            "dsh/openharness-browser-use.patch.yml",
+            "dsh/node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs",
+            "python/python.exe",
+        ] {
+            let file = fixture.0.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, "").unwrap();
+        }
+        let paths = resolve_runtime_for_platform(&fixture.0, true).unwrap();
+        assert!(paths.browser_use_ready());
+    }
+
     #[test]
     fn rejects_entry_outside_package() {
         let fixture = Fixture::new();

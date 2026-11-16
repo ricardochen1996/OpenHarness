@@ -30,6 +30,9 @@ assets or imply endorsement by or affiliation with DeepSeek.
   managed restart when activation requires it
 - Bundled pnpm execution environment; plugin management does not depend on a
   system Node.js or pnpm installation
+- Windows x64 offline builds include the `browser-use-mcp` server: eight browser
+  tools drive the system Chrome or Edge, backed by a bundled Python engine and
+  wheels, so the offline machine never runs pip
 - Runtime telemetry disabled by the desktop launcher
 - Live system-tray session menu: five prioritized tasks, 20 more recent
   sessions, and a link to the complete list in Harness
@@ -47,6 +50,8 @@ assets or imply endorsement by or affiliation with DeepSeek.
 - macOS 15.0 or later (Apple Silicon or Intel)
 - Windows 10 1709 or later on x64 or arm64 with the Microsoft Edge WebView2
   Runtime; Windows 11 is recommended
+- Chrome or Microsoft Edge for the bundled browser tools in the Windows x64
+  offline build; Windows normally ships Edge
 - Linux x64 or arm64 with kernel 4.18+, glibc 2.35+, and WebKitGTK 4.1;
   Ubuntu 22.04+ and Debian 12+ are the supported baselines
 - Credentials for at least one model provider supported by the bundled runtime
@@ -158,6 +163,10 @@ and the native toolchain for your platform:
 - Linux: WebKitGTK 4.1 and the other
   [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux)
 
+Windows x64 runtime assembly also needs Python 3 with pip on the build machine:
+it installs the browser MCP's hash-pinned Windows wheels into the bundled
+embeddable Python. The installed app needs no Python and never downloads wheels.
+
 Then build the app:
 
 ```sh
@@ -187,6 +196,16 @@ installed runtime with an isolated temporary `DSH_HOME`. The smoke test checks
 the published CLI entry, native modules, managed plugin imports, authentication
 redirect, and branded Web UI. Run it locally with
 `node scripts/smoke-runtime.mjs /absolute/path/to/runtime`.
+
+The Windows x64 artifact also bundles `browser-use-mcp` and enables it as the
+`browser` MCP server, adding tools such as `mcp__browser__browser_open` and
+`mcp__browser__browser_act`. Browser calls launch the system Chrome when
+installed, otherwise Microsoft Edge; the Python engine, its hash-pinned wheels,
+and the browser-side driver are all inside the installer. The offline machine
+needs no pip, package downloads, or bundled Chromium. Browser state and profiles
+live under `%USERPROFILE%\.dsh\browser-use-mcp`. The workflow opens a real local
+page through this stack with `node scripts/smoke-browser-use.mjs <runtime>
+<chrome-or-edge>` before publishing the artifact.
 
 To update an offline Windows machine, copy the artifact from the Mac, extract
 it, and compare `Get-FileHash .\OpenHarness_windows_x64_offline-setup.exe -Algorithm SHA256`

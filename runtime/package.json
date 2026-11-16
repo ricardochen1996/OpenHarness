@@ -9,6 +9,7 @@
     "@deepseek-ai/dsh": "0.2.2-rc.1",
     "@microspotlight/openharness-find-plugin": "0.1.0",
     "@openharness/native-bridge": "file:./native-bridge",
+    "@ricardochen1996/browser-use-mcp": "0.1.5",
     "pnpm": "11.19.0"
   }
 }

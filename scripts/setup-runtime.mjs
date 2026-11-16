@@ -36,6 +36,27 @@ const DSH_DIR = join(RUNTIME_DIR, "dsh");
 const MANIFEST_DIR = join(PROJECT_ROOT, "runtime");
 const NODE_STAMP = join(RUNTIME_DIR, ".openharness-node-version");
 const RUNTIME_STAMP = join(DSH_DIR, ".openharness-runtime.sha256");
+const PYTHON_DIR = join(RUNTIME_DIR, "python");
+const PYTHON_STAMP = join(PYTHON_DIR, ".openharness-python-version");
+const BROWSER_USE_MCP_DIR = join(
+  DSH_DIR,
+  "node_modules",
+  "@ricardochen1996",
+  "browser-use-mcp",
+);
+const BROWSER_USE_MCP_PATCH = join(MANIFEST_DIR, "openharness-browser-use.patch.yml");
+
+// The browser MCP's engine is Python. An embeddable CPython keeps the runtime
+// self-contained and small; its site-packages are populated at assembly time so
+// an offline machine never runs pip. Only the Windows x64 build carries it.
+const PYTHON_VERSION = "3.12.10";
+const PYTHON_DISTRIBUTIONS = {
+  "win32-x64": {
+    archive: `python-${PYTHON_VERSION}-embed-amd64.zip`,
+    url: `https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-embed-amd64.zip`,
+    sha256: "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
+  },
+};
 
 const NODE_DISTRIBUTIONS = {
   "darwin-arm64": {
@@ -140,6 +161,7 @@ async function runtimeManifestHash(target, bunVersion) {
     join(MANIFEST_DIR, "bun.lock"),
     join(MANIFEST_DIR, "openharness.patch.yml"),
     join(MANIFEST_DIR, "openharness-find.patch.yml"),
+    BROWSER_USE_MCP_PATCH,
     join(MANIFEST_DIR, "native-bridge"),
     join(MANIFEST_DIR, "pnpm-launcher"),
     join(PROJECT_ROOT, "scripts", "brand-runtime.mjs"),
@@ -148,7 +170,7 @@ async function runtimeManifestHash(target, bunVersion) {
   ];
   const files = (await Promise.all(inputs.map(collectFiles))).flat().sort();
   const hash = createHash("sha256");
-  hash.update(`${NODE_VERSION}\0${target.key}\0${bunVersion}\0`);
+  hash.update(`${NODE_VERSION}\0${PYTHON_VERSION}\0${target.key}\0${bunVersion}\0`);
   for (const file of files) {
     hash.update(`${relative(PROJECT_ROOT, file).replaceAll("\\", "/")}\0`);
     hash.update(await readFile(file));
@@ -248,6 +270,7 @@ export function requiredPortableRuntimeFiles() {
   return [
     "openharness.patch.yml",
     "openharness-find.patch.yml",
+    "openharness-browser-use.patch.yml",
     "openharness-bin/pnpm",
     "openharness-bin/pnpm.cmd",
     "node_modules/pnpm/bin/pnpm.cjs",
@@ -260,6 +283,9 @@ export function requiredPortableRuntimeFiles() {
     "node_modules/@microspotlight/openharness-find-plugin/lib/index.js",
     "node_modules/@microspotlight/openharness-find-plugin/lib/client.js",
     "node_modules/@microspotlight/openharness-find-plugin/cordis.patch.yml",
+    "node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs",
+    "node_modules/@ricardochen1996/browser-use-mcp/sidecar/bridge.py",
+    "node_modules/@ricardochen1996/browser-use-mcp/vendor/requirements.txt",
   ];
 }
 
@@ -310,6 +336,13 @@ async function verifyRuntime(target, nodePath) {
   }
   if (dshManifest.dependencies?.["@openharness/native-bridge"] !== "0.1.0") {
     throw new Error("Bundled native bridge is missing from the DSH installation dependency closure");
+  }
+  const browserUseVendor = join(BROWSER_USE_MCP_DIR, "vendor");
+  const engineWheels = (await readdir(browserUseVendor)).filter((name) =>
+    /^jev_ultrafast-.+\.whl$/.test(name),
+  );
+  if (engineWheels.length !== 1) {
+    throw new Error("Bundled browser-use-mcp engine wheel is missing");
   }
   if (target.os === process.platform && target.cpu === process.arch) {
     const version = run(nodePath, ["--version"], { capture: true });
@@ -368,6 +401,177 @@ export async function pruneForeignDshPackages(nodeModulesDirectory, expectedVers
   }
 }
 
+function hostPipCandidates() {
+  const candidates = [];
+  if (process.env.OPENHARNESS_PYTHON) {
+    candidates.push({ command: process.env.OPENHARNESS_PYTHON, prefix: [] });
+  }
+  if (process.platform === "win32") {
+    // `python3.exe` is often a Microsoft Store alias that does not run pip.
+    candidates.push({ command: "python", prefix: [] });
+    candidates.push({ command: "py", prefix: ["-3"] });
+  } else {
+    candidates.push({ command: "python3", prefix: [] });
+    candidates.push({ command: "python", prefix: [] });
+  }
+  return candidates;
+}
+
+function findHostPip() {
+  for (const candidate of hostPipCandidates()) {
+    try {
+      if (run(candidate.command, [...candidate.prefix, "-m", "pip", "--version"], { capture: true })) {
+        return candidate;
+      }
+    } catch {
+      // Try the next interpreter.
+    }
+  }
+  return undefined;
+}
+
+async function prunePythonCaches(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "__pycache__") await rm(path, { recursive: true, force: true });
+      else await prunePythonCaches(path);
+    } else if (entry.name.endsWith(".pyc")) {
+      await rm(path, { force: true });
+    }
+  }
+}
+
+// The Windows offline MCP needs Python and its wheels inside the installer; an
+// offline machine cannot run pip. The wheels are installed from the package's
+// hash-pinned requirements at assembly time, for the Windows target even when
+// the build host is macOS or Linux.
+async function installBrowserUseMcp(target) {
+  const distribution = PYTHON_DISTRIBUTIONS[target.key];
+  if (!distribution) {
+    if (target.os === "win32") {
+      console.log(`>> Browser MCP Python is not provisioned for ${target.key}`);
+    }
+    return;
+  }
+  if (!(await fileExists(join(BROWSER_USE_MCP_DIR, "package.json")))) {
+    throw new Error("Bundled browser-use-mcp package is missing");
+  }
+
+  const pythonPath = join(PYTHON_DIR, "python.exe");
+  const expectedStamp = `${PYTHON_VERSION}/${target.key}`;
+  const installedStamp = await readFile(PYTHON_STAMP, "utf8").catch(() => "");
+  const sitePackages = join(PYTHON_DIR, "Lib", "site-packages");
+  const provisioned = async () =>
+    (await fileExists(pythonPath)) &&
+    (await directoryExists(join(sitePackages, "jev_ultrafast"))) &&
+    (await directoryExists(join(sitePackages, "browser_harness"))) &&
+    (await directoryExists(join(sitePackages, "websockets")));
+  if ((await provisioned()) && installedStamp.trim() === expectedStamp) {
+    console.log(`>> Browser MCP Python ${expectedStamp} already installed`);
+    return;
+  }
+
+  console.log(`>> Installing browser MCP Python ${expectedStamp}`);
+  await rm(PYTHON_DIR, { recursive: true, force: true });
+  await mkdir(PYTHON_DIR, { recursive: true });
+  const downloadDir = await mkdtemp(join(tmpdir(), "openharness-python-"));
+  try {
+    const archivePath = join(downloadDir, distribution.archive);
+    console.log(`>> Downloading ${distribution.url}`);
+    await download(distribution.url, archivePath);
+    const actualHash = await sha256(archivePath);
+    if (actualHash !== distribution.sha256) {
+      throw new Error(`Python archive SHA-256 mismatch: expected ${distribution.sha256}, got ${actualHash}`);
+    }
+    run("tar", ["-xf", archivePath, "-C", PYTHON_DIR]);
+  } finally {
+    await rm(downloadDir, { recursive: true, force: true });
+  }
+
+  const pthName = (await readdir(PYTHON_DIR)).find((name) => /^python\d+\._pth$/.test(name));
+  if (!pthName) throw new Error("Bundled Python archive is missing its ._pth file");
+  const pthPath = join(PYTHON_DIR, pthName);
+  const pthLines = (await readFile(pthPath, "utf8"))
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "");
+  for (const line of ["Lib/site-packages", "import site"]) {
+    if (!pthLines.includes(line)) pthLines.push(line);
+  }
+  await writeFile(pthPath, `${pthLines.join("\n")}\n`);
+  await mkdir(sitePackages, { recursive: true });
+
+  const pip = findHostPip();
+  if (!pip) {
+    const message = "Bundling the browser MCP requires a Python with pip on the build machine";
+    if (process.env.OPENHARNESS_REQUIRE_BROWSER_USE_MCP === "1") throw new Error(message);
+    console.warn(`>> ${message}; skipping browser MCP Python dependencies`);
+    await rm(PYTHON_DIR, { recursive: true, force: true });
+    return;
+  }
+
+  const requirements = join(BROWSER_USE_MCP_DIR, "vendor", "requirements.txt");
+  if (!(await fileExists(requirements))) {
+    throw new Error("Bundled browser-use-mcp requirements are missing");
+  }
+  const pipArgs = [
+    ...pip.prefix,
+    "-m",
+    "pip",
+    "install",
+    "--disable-pip-version-check",
+    "--no-compile",
+    "--no-warn-script-location",
+    "--index-url",
+    "https://pypi.org/simple",
+    "--target",
+    sitePackages,
+    "--platform",
+    "win_amd64",
+    "--python-version",
+    "3.12",
+    "--implementation",
+    "cp",
+    "--abi",
+    "cp312",
+    "--only-binary=:all:",
+    "--no-deps",
+  ];
+  run(pip.command, [...pipArgs, "--require-hashes", "-r", requirements]);
+  const engineWheel = (await readdir(join(BROWSER_USE_MCP_DIR, "vendor"))).find((name) =>
+    /^jev_ultrafast-.+\.whl$/.test(name),
+  );
+  if (!engineWheel) throw new Error("Bundled browser-use-mcp engine wheel is missing");
+  run(pip.command, [...pipArgs, join(BROWSER_USE_MCP_DIR, "vendor", engineWheel)]);
+  await prunePythonCaches(PYTHON_DIR);
+
+  for (const packageName of ["jev_ultrafast", "browser_harness", "websockets"]) {
+    if (!(await directoryExists(join(sitePackages, packageName)))) {
+      throw new Error(`Browser MCP Python package is missing after install: ${packageName}`);
+    }
+  }
+  const pythonPaths = (await collectFiles(PYTHON_DIR)).map((file) =>
+    relative(RUNTIME_DIR, file).replaceAll("\\", "/"),
+  );
+  const oversized = oversizedBundledPaths(pythonPaths);
+  if (oversized.length > 0) {
+    throw new Error(
+      `${oversized.length} bundled Python path(s) exceed the ${MAX_BUNDLED_PATH_LENGTH}-character ` +
+        `Windows budget; longest (${oversized[0].length}): ${oversized[0]}`,
+    );
+  }
+  if (target.os === process.platform && target.cpu === process.arch) {
+    run(pythonPath, ["-c", "import jev_ultrafast, browser_harness, websockets"], {
+      cwd: BROWSER_USE_MCP_DIR,
+    });
+  } else {
+    console.log(
+      `>> Skipping execution of ${target.key} Python on ${process.platform}-${process.arch}`,
+    );
+  }
+  await writeFile(PYTHON_STAMP, `${expectedStamp}\n`);
+}
+
 async function assembleDsh(target) {
   await rm(DSH_DIR, { recursive: true, force: true });
   await mkdir(DSH_DIR, { recursive: true });
@@ -378,6 +582,7 @@ async function assembleDsh(target) {
     join(MANIFEST_DIR, "openharness-find.patch.yml"),
     join(DSH_DIR, "openharness-find.patch.yml"),
   );
+  await copyFile(BROWSER_USE_MCP_PATCH, join(DSH_DIR, "openharness-browser-use.patch.yml"));
   await cp(join(MANIFEST_DIR, "native-bridge"), join(DSH_DIR, "native-bridge"), { recursive: true });
   await cp(join(MANIFEST_DIR, "pnpm-launcher"), join(DSH_DIR, "openharness-bin"), { recursive: true });
   if (target.os !== "win32") await chmod(join(DSH_DIR, "openharness-bin", "pnpm"), 0o755);
@@ -437,6 +642,7 @@ async function main() {
   console.log(`>> Assembling OpenHarness runtime for ${target.key}`);
   const nodePath = await installNode(target);
   await installDsh(target, nodePath);
+  await installBrowserUseMcp(target);
   console.log(`>> Runtime ready: ${RUNTIME_DIR}`);
 }
 

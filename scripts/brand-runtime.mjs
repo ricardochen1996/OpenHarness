@@ -237,4 +237,20 @@ dshManifest.dependencies["@openharness/native-bridge"] = "0.1.0";
 dshManifest.dependencies["@microspotlight/openharness-find-plugin"] = "0.1.0";
 write("dsh/package.json", `${JSON.stringify(dshManifest, null, 2)}\n`);
 
+// DSH disables plugins whose dsh peer ranges do not match the running runtime.
+// The Find Plugin still declares 0.1.0-rc.6 peers; its server surface and the
+// icon mapping above are validated against the adopted runtime, so align the
+// declaration with the version this package actually bundles.
+const findPluginManifestPath = resolve(
+  packagesRoot,
+  "../@microspotlight/openharness-find-plugin/package.json",
+);
+const findPluginManifest = JSON.parse(readFileSync(findPluginManifestPath, "utf8"));
+for (const name of Object.keys(findPluginManifest.peerDependencies ?? {})) {
+  if (name === "@deepseek-ai/dsh" || name.startsWith("@deepseek-ai/dsh-")) {
+    findPluginManifest.peerDependencies[name] = dshManifest.version;
+  }
+}
+writeFileSync(findPluginManifestPath, `${JSON.stringify(findPluginManifest, null, 2)}\n`);
+
 console.log(">> OpenHarness runtime branding applied");

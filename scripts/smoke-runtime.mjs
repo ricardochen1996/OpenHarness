@@ -22,6 +22,35 @@ const dsh = join(root, "dsh");
 const entry = await resolveDshEntry(dsh);
 const home = await mkdtemp(join(tmpdir(), "OpenHarness smoke 测试 "));
 const launcher = join(dsh, "openharness-bin");
+const browserUsePatch = join(dsh, "openharness-browser-use.patch.yml");
+const browserUseEntry = join(
+  dsh,
+  "node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs",
+);
+const python = join(root, process.platform === "win32" ? "python/python.exe" : "python/bin/python3");
+const browserUseReady =
+  (await stat(browserUsePatch).catch(() => undefined))?.isFile() === true &&
+  (await stat(browserUseEntry).catch(() => undefined))?.isFile() === true &&
+  (await stat(python).catch(() => undefined))?.isFile() === true;
+
+async function findSystemBrowser() {
+  if (process.env.OPENHARNESS_BROWSER_EXECUTABLE) return process.env.OPENHARNESS_BROWSER_EXECUTABLE;
+  if (process.platform === "win32") {
+    for (const [base, relative] of [
+      [process.env.PROGRAMFILES, "Google\\Chrome\\Application\\chrome.exe"],
+      [process.env["PROGRAMFILES(X86)"], "Google\\Chrome\\Application\\chrome.exe"],
+      [process.env.LOCALAPPDATA, "Google\\Chrome\\Application\\chrome.exe"],
+      [process.env["PROGRAMFILES(X86)"], "Microsoft\\Edge\\Application\\msedge.exe"],
+      [process.env.PROGRAMFILES, "Microsoft\\Edge\\Application\\msedge.exe"],
+    ]) {
+      if (!base) continue;
+      const candidate = join(base, relative);
+      if ((await stat(candidate).catch(() => undefined))?.isFile()) return candidate;
+    }
+  }
+  return "";
+}
+
 const env = Object.fromEntries(
   ["SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "PATH"].filter((key) => process.env[key]).map((key) => [key, process.env[key]]),
 );
@@ -35,9 +64,18 @@ Object.assign(env, {
   OPENHARNESS_DSH_ENTRY: entry, OPENHARNESS_PACKAGE_MANAGER_BIN: launcher,
   OPENHARNESS_RESTART_EXIT_CODE: "75",
 });
+if (browserUseReady) {
+  Object.assign(env, {
+    OPENHARNESS_BROWSER_USE_HOME: join(home, "browser-use-mcp"),
+    OPENHARNESS_BROWSER_USE_MCP_ENTRY: browserUseEntry,
+    OPENHARNESS_BROWSER_USE_MCP_CWD: dsh,
+    OPENHARNESS_PYTHON_PATH: python,
+    OPENHARNESS_BROWSER_EXECUTABLE: await findSystemBrowser(),
+  });
+}
 let child;
 try {
-  for (const file of [node, join(launcher, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), join(dsh, "openharness.patch.yml"), join(dsh, "openharness-find.patch.yml")]) {
+  for (const file of [node, join(launcher, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), join(dsh, "openharness.patch.yml"), join(dsh, "openharness-find.patch.yml"), browserUsePatch]) {
     assert.ok((await stat(file)).isFile(), `Missing installed runtime file: ${file}`);
   }
   const manifest = JSON.parse(await readFile(join(dsh, "node_modules/@deepseek-ai/dsh/package.json"), "utf8"));
@@ -49,11 +87,13 @@ try {
     assert.equal(result.status, 0, result.stderr);
     if (args.includes("--help")) assert.match(result.stdout, /--no-open/);
   }
-  child = spawn(node, [entry, "--profile", "web", "--patch", join(dsh, "openharness.patch.yml"), "--patch", join(dsh, "openharness-find.patch.yml"), "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+  const patches = [join(dsh, "openharness.patch.yml"), join(dsh, "openharness-find.patch.yml")];
+  if (browserUseReady) patches.push(browserUsePatch);
+  child = spawn(node, [entry, "--profile", "web", ...patches.flatMap((patch) => ["--patch", patch]), "--host", "127.0.0.1", "--port", "0", "--no-open"], {
     cwd: home, env, detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
   });
+  let output = "";
   const url = await new Promise((resolveUrl, reject) => {
-    let output = "";
     const diagnostics = () => output.replace(/dsh web: [^\r\n]*/g, "dsh web: [startup URL omitted]");
     const timer = setTimeout(() => reject(new Error(`Runtime startup timed out: ${diagnostics()}`)), 60000);
     const finish = (error, url) => { clearTimeout(timer); error ? reject(error) : resolveUrl(url); };
@@ -78,6 +118,10 @@ try {
   const response = await fetch(new URL("/", url), { headers: { cookie }, signal: AbortSignal.timeout(10000) });
   assert.equal(response.status, 200);
   assert.match(await response.text(), /<title>OpenHarness<\/title>/);
+  assert.doesNotMatch(output, /disabling profile plugin row/, "bundled plugins must stay enabled");
+  if (browserUseReady) {
+    assert.match(output, /browser-use-mcp serving MCP on stdio/, "bundled browser MCP must start");
+  }
   console.log(`PASS: installed runtime ${manifest.version}, native modules, CLI, managed plugins, and branded loopback page`);
 } finally {
   if (child?.pid) {

@@ -34,7 +34,9 @@ Git. Never edit or commit it as source.
 ## Toolchain And Commands
 
 Required local tools are Rust, Bun, Node.js, and the platform prerequisites
-listed in `README.md`.
+listed in `README.md`. Assembling the Windows x64 runtime additionally needs
+Python 3 with pip on the build machine: the browser MCP's Windows wheels are
+installed into the bundled embeddable Python during assembly, never at runtime.
 
 ```sh
 bun install --frozen-lockfile
@@ -84,6 +86,13 @@ change also requires the relevant Tauri build or CI job.
 - Keep runtime telemetry disabled from the desktop launcher.
 - Use the managed Node.js and pnpm paths for plugin operations. Do not silently
   depend on a user's global Node.js or package-manager installation.
+- The browser MCP ships only in the Windows x64 runtime. Its Python engine and
+  hash-pinned wheels are assembled into the installer; the offline target must
+  never run pip or download a browser. Launch the system Chrome/Edge and keep
+  the browser profile under the user's `DSH_HOME`.
+- DSH disables plugin rows whose declared dsh peer ranges do not match the
+  running runtime. Branding aligns the Find Plugin's stale peers; keep that
+  compatibility check passing.
 - Hand the child process plain paths on Windows. Tauri's `resource_dir()` is a
   verbatim (`\\?\C:\...`) path, which Rust reads but Node's CommonJS loader
   cannot resolve as an entry: it fails with
@@ -109,10 +118,14 @@ change also requires the relevant Tauri build or CI job.
    adopted release. Stale peers declared by the Find Plugin would otherwise
    nest an old `0.1.x` tree, and the resulting `node_modules` depth breaks the
    Windows installer long before it breaks anything else. Reintroduce targeted
-   overrides only if upstream ships a conflicting range.
+   overrides only if upstream ships a conflicting range. Branding also rewrites
+   the Find Plugin's dsh peer declarations to the adopted runtime, because DSH
+   disables plugin rows whose declarations do not match.
 4. Rebuild or validate the managed runtime with `bun run setup:runtime`.
 5. Verify OpenHarness branding, startup URL detection, Native Bridge loading,
-   plugin discovery, and the no-external-browser invariant.
+   plugin discovery, the Find Plugin compatibility gate, the browser MCP's
+   Python engine and system-browser launch on Windows, and the
+   no-external-browser invariant.
 6. Run all JavaScript and Rust tests. For meaningful Web UI changes, perform an
    isolated real-runtime smoke test in addition to unit tests.
 7. Commit only source manifests, lockfiles, patches, tests, and documentation;

@@ -23,6 +23,8 @@ OpenHarness 由 MicroSpotlight 独立开发。为避免与 DeepSeek 品牌产生
 - 在 App 内安装或升级插件，目标固定到精确包版本或 Git commit，并支持取消、失败回滚、
   安装后验证以及需要激活时的受管重启
 - 内置 pnpm 执行环境，插件管理不依赖系统安装的 Node.js 或 pnpm
+- Windows x64 离线安装包内置 `browser-use-mcp`：8 个浏览器工具驱动系统 Chrome
+  或 Edge，Python 引擎与依赖随包提供，离线机器无需运行 pip
 - 桌面启动器默认关闭内置运行时的遥测
 - 系统托盘常驻：顶层展示 5 个优先会话，「更多会话」展示 20 个最近会话并可查看全部
 - 单实例锁：重复启动会聚焦已运行实例
@@ -38,6 +40,8 @@ OpenHarness 由 MicroSpotlight 独立开发。为避免与 DeepSeek 品牌产生
 - macOS 15.0 或更高版本（Apple Silicon 或 Intel）
 - Windows 10 1709 或更高版本（x64 或 arm64），并安装 Microsoft Edge WebView2
   Runtime；推荐使用 Windows 11
+- Windows x64 离线包中的浏览器工具需要系统安装 Chrome 或 Microsoft Edge；
+  Windows 通常自带 Edge
 - Linux x64 或 arm64，kernel 4.18+、glibc 2.35+、WebKitGTK 4.1；支持基线为
   Ubuntu 22.04+ 和 Debian 12+
 - 至少一个内置运行时支持的模型服务商凭据
@@ -133,6 +137,10 @@ OpenHarness 不在 Rust 中实现目录或安装策略。桌面 App 通过 Cordi
 - Windows：包含 C++ 工作负载的 Visual Studio Build Tools 和 WebView2
 - Linux：WebKitGTK 4.1 及其他
   [Tauri Linux 前置依赖](https://v2.tauri.app/start/prerequisites/#linux)
+
+在构建 Windows x64 运行时前，构建机还需要 Python 3 和 pip：组装脚本会把
+`browser-use-mcp` 的 Windows wheel 安装进随包的 embeddable Python。安装后的应用
+不需要 Python，也不会在目标机器上下载依赖。
 
 然后执行：
 

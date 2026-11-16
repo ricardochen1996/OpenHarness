@@ -36,7 +36,7 @@ use url::{Host, Url};
 
 mod runtime_paths;
 mod status_bar;
-use runtime_paths::{resolve_runtime, RuntimePaths};
+use runtime_paths::{child_path, resolve_runtime, RuntimePaths};
 
 use status_bar::{select_sessions, validate_snapshot, SessionMenuEntry, SessionMenuSnapshot};
 #[cfg(test)]
@@ -707,6 +707,30 @@ fn load_shell_env_or_empty() -> Vec<(String, String)> {
     }
 }
 
+/// The Chromium browser the bundled browser MCP launches. Windows always ships
+/// Edge; Chrome is preferred when the user has installed it.
+fn find_system_browser() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        for (variable, relative) in [
+            ("PROGRAMFILES", r"Google\Chrome\Application\chrome.exe"),
+            ("PROGRAMFILES(X86)", r"Google\Chrome\Application\chrome.exe"),
+            ("LOCALAPPDATA", r"Google\Chrome\Application\chrome.exe"),
+            ("PROGRAMFILES(X86)", r"Microsoft\Edge\Application\msedge.exe"),
+            ("PROGRAMFILES", r"Microsoft\Edge\Application\msedge.exe"),
+        ] {
+            let Some(base) = std::env::var_os(variable) else {
+                continue;
+            };
+            let path = PathBuf::from(base).join(relative);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn configure_harness_args(
     command: &mut Command,
     runtime: &RuntimePaths,
@@ -719,6 +743,9 @@ fn configure_harness_args(
         .arg(&runtime.patch);
     if !profile_has_find_plugin {
         command.arg("--patch").arg(&runtime.find_plugin_patch);
+    }
+    if runtime.browser_use_ready() {
+        command.arg("--patch").arg(&runtime.browser_use_patch);
     }
     command.args(["--host", "127.0.0.1", "--port", "0", "--no-open"]);
 }
@@ -737,6 +764,8 @@ fn spawn_harness(
     let inherited_path = std::env::var_os("PATH");
     let executable_path = managed_runtime_path(&runtime, shell_env, inherited_path.as_deref());
     let profile_has_find_plugin = profile_declares_bundle(&profile_directory, FIND_PLUGIN_PACKAGE);
+    let browser_use_ready = runtime.browser_use_ready();
+    let browser_use_home = dsh_home.join("browser-use-mcp");
 
     let mut command = Command::new(&runtime.node);
     configure_harness_args(&mut command, &runtime, profile_has_find_plugin);
@@ -761,7 +790,37 @@ fn spawn_harness(
         .env(
             "OPENHARNESS_RESTART_EXIT_CODE",
             MANAGED_RESTART_EXIT_CODE.to_string(),
-        )
+        );
+    if browser_use_ready {
+        // The MCP keeps its browser profile and state beside DSH_HOME, which is
+        // user-owned and writable even when the app is installed for all users.
+        let _ = fs::create_dir_all(&browser_use_home);
+        let browser = find_system_browser();
+        command
+            .env(
+                "OPENHARNESS_BROWSER_USE_HOME",
+                child_path(&browser_use_home, cfg!(windows)),
+            )
+            .env(
+                "OPENHARNESS_BROWSER_USE_MCP_ENTRY",
+                child_path(&runtime.browser_use_entry, cfg!(windows)),
+            )
+            .env(
+                "OPENHARNESS_BROWSER_USE_MCP_CWD",
+                child_path(&runtime.dsh_dir, cfg!(windows)),
+            )
+            .env(
+                "OPENHARNESS_PYTHON_PATH",
+                child_path(&runtime.python, cfg!(windows)),
+            )
+            .env(
+                "OPENHARNESS_BROWSER_EXECUTABLE",
+                browser
+                    .map(|path| child_path(&path, cfg!(windows)).to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+    }
+    command
         .current_dir(home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2076,8 +2135,14 @@ INVALID-KEY=value\0";
             root: PathBuf::from("/app/runtime"),
             node: PathBuf::from("/app/runtime/node"),
             dsh_entry: PathBuf::from("/app/runtime/dsh/bin.js"),
+            dsh_dir: PathBuf::from("/app/runtime/dsh"),
             patch: PathBuf::from("/app/runtime/dsh/openharness.patch.yml"),
             find_plugin_patch: PathBuf::from("/app/runtime/dsh/openharness-find.patch.yml"),
+            browser_use_patch: PathBuf::from("/app/runtime/dsh/openharness-browser-use.patch.yml"),
+            browser_use_entry: PathBuf::from(
+                "/app/runtime/dsh/node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs",
+            ),
+            python: PathBuf::from("/app/runtime/python/bin/python3"),
             package_manager_bin: PathBuf::from("/app/runtime/dsh/openharness-bin"),
         };
         let shell_env = vec![(
@@ -2113,8 +2178,14 @@ INVALID-KEY=value\0";
             root: PathBuf::from("/app/runtime"),
             node: PathBuf::from("/app/runtime/node"),
             dsh_entry: PathBuf::from("/app/runtime/dsh/bin.js"),
+            dsh_dir: PathBuf::from("/app/runtime/dsh"),
             patch: PathBuf::from("/app/runtime/dsh/openharness.patch.yml"),
             find_plugin_patch: PathBuf::from("/app/runtime/dsh/openharness-find.patch.yml"),
+            browser_use_patch: PathBuf::from("/app/runtime/dsh/openharness-browser-use.patch.yml"),
+            browser_use_entry: PathBuf::from(
+                "/app/runtime/dsh/node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs",
+            ),
+            python: PathBuf::from("/app/runtime/python/bin/python3"),
             package_manager_bin: PathBuf::from("/app/runtime/dsh/openharness-bin"),
         };
         let mut command = Command::new(&runtime.node);

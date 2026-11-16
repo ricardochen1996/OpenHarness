@@ -92,6 +92,7 @@ test("requires the plugin discovery and package manager runtime files", () => {
   assert.deepEqual(requiredPortableRuntimeFiles(), [
     "openharness.patch.yml",
     "openharness-find.patch.yml",
+    "openharness-browser-use.patch.yml",
     "openharness-bin/pnpm",
     "openharness-bin/pnpm.cmd",
     "node_modules/pnpm/bin/pnpm.cjs",
@@ -104,6 +105,9 @@ test("requires the plugin discovery and package manager runtime files", () => {
     "node_modules/@microspotlight/openharness-find-plugin/lib/index.js",
     "node_modules/@microspotlight/openharness-find-plugin/lib/client.js",
     "node_modules/@microspotlight/openharness-find-plugin/cordis.patch.yml",
+    "node_modules/@ricardochen1996/browser-use-mcp/bin/browser-use-mcp.mjs",
+    "node_modules/@ricardochen1996/browser-use-mcp/sidecar/bridge.py",
+    "node_modules/@ricardochen1996/browser-use-mcp/vendor/requirements.txt",
   ]);
 });
 

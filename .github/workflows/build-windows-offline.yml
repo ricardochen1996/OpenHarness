@@ -20,11 +20,15 @@ jobs:
       OPENHARNESS_RUNTIME_OS: windows
       OPENHARNESS_RUNTIME_CPU: x64
       OPENHARNESS_BUILD_NUMBER: ${{ github.run_number }}
+      OPENHARNESS_REQUIRE_BROWSER_USE_MCP: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.9
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: nightly-2025-08-07
@@ -32,6 +36,26 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri -> target
+      - name: Detect system Chrome or Edge
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @(
+            @{ Root = $env:ProgramFiles; Path = 'Google\Chrome\Application\chrome.exe' },
+            @{ Root = ${env:ProgramFiles(x86)}; Path = 'Google\Chrome\Application\chrome.exe' },
+            @{ Root = $env:LOCALAPPDATA; Path = 'Google\Chrome\Application\chrome.exe' },
+            @{ Root = ${env:ProgramFiles(x86)}; Path = 'Microsoft\Edge\Application\msedge.exe' },
+            @{ Root = $env:ProgramFiles; Path = 'Microsoft\Edge\Application\msedge.exe' }
+          )
+          $browser = $null
+          foreach ($candidate in $candidates) {
+            if (-not $candidate.Root) { continue }
+            $path = Join-Path $candidate.Root $candidate.Path
+            if (Test-Path -LiteralPath $path) { $browser = $path; break }
+          }
+          if (-not $browser) { throw 'No Chrome or Edge installation found' }
+          Write-Host "Using browser: $browser"
+          "OPENHARNESS_BROWSER_EXECUTABLE=$browser" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
       - name: Assemble locked Windows runtime
         run: bun install --frozen-lockfile --registry=https://registry.npmjs.org
       - name: JavaScript tests
@@ -72,6 +96,15 @@ jobs:
           if (-not $verbatim.StartsWith('\\?\')) { throw "Not a verbatim path: $verbatim" }
           node scripts/smoke-runtime.mjs $verbatim
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke test the bundled browser MCP
+        shell: pwsh
+        run: |
+          # Drives a real page through the packaged Node, Python engine, and the
+          # system Chrome/Edge, without any network install at run time.
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:OPENHARNESS_BROWSER_EXECUTABLE) { throw 'System browser was not detected' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'OpenHarness 安装 测试'
+          node scripts/smoke-browser-use.mjs (Join-Path $installDir 'runtime') $env:OPENHARNESS_BROWSER_EXECUTABLE
       - name: Launch installed app with an isolated DSH_HOME
         shell: pwsh
         run: |
@@ -102,6 +135,10 @@ jobs:
             Write-Host $logged
             throw 'The installed app logged a backend startup failure'
           }
+          if ($logged -notmatch 'browser-use-mcp serving MCP on stdio') {
+            Write-Host $logged
+            throw 'The bundled browser MCP did not start'
+          }
           Get-Process OpenHarness -ErrorAction SilentlyContinue | Stop-Process -Force
           # Only the bundled runtime, never the runner's own Node processes.
           Get-Process node -ErrorAction SilentlyContinue |
@@ -125,8 +162,10 @@ jobs:
             "Commit: $env:GITHUB_SHA"
             "Runtime: $runtime"
             "Architecture: Windows x64"
+            "Browser MCP: @ricardochen1996/browser-use-mcp 0.1.5 (system Chrome/Edge)"
+            "Python engine: bundled; no pip or browser download at run time"
             "WebView2: bundled offline installer"
-            "Validation: Windows tests and installed-runtime smoke test passed"
+            "Validation: Windows tests, installed-runtime smoke, and browser MCP page-open smoke passed"
             "Build: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
             "Unsigned private build. Back up DSH_HOME before installing."
           ) | Set-Content dist/windows/BUILD.txt -Encoding utf8
