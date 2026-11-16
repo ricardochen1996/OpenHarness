@@ -23,8 +23,12 @@ assert.ok(browser, "Pass the Chrome/Edge executable as the second argument");
 assert.ok((await stat(browser).catch(() => undefined))?.isFile(), `Browser executable is missing: ${browser}`);
 
 const require = createRequire(join(packageDir, "package.json"));
-const { Client } = await import(require.resolve("@modelcontextprotocol/sdk/client/index.js"));
-const { StdioClientTransport } = await import(require.resolve("@modelcontextprotocol/sdk/client/stdio.js"));
+const { Client } = await import(
+  pathToFileURL(require.resolve("@modelcontextprotocol/sdk/client/index.js")).href
+);
+const { StdioClientTransport } = await import(
+  pathToFileURL(require.resolve("@modelcontextprotocol/sdk/client/stdio.js")).href
+);
 
 const home = await mkdtemp(join(tmpdir(), "OpenHarness browser MCP smoke "));
 const fixture = join(home, "fixture.html");
