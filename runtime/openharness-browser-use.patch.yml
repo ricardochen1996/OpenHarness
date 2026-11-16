@@ -20,5 +20,8 @@
           BROWSER_USE_MCP_HOME: !!js process.env.OPENHARNESS_BROWSER_USE_HOME
           BROWSER_USE_MCP_PYTHON: !!js process.env.OPENHARNESS_PYTHON_PATH
           BROWSER_USE_MCP_LOG_LEVEL: info
+          # The engine reads UTF-8 JavaScript with Python's default locale
+          # encoding; Windows would otherwise use cp1252.
+          PYTHONUTF8: "1"
         toolCallTimeoutMs: 120000
         failOnStartupError: false

@@ -71,6 +71,7 @@ if (browserUseReady) {
     OPENHARNESS_BROWSER_USE_MCP_CWD: dsh,
     OPENHARNESS_PYTHON_PATH: python,
     OPENHARNESS_BROWSER_EXECUTABLE: await findSystemBrowser(),
+    PYTHONUTF8: "1",
   });
 }
 let child;

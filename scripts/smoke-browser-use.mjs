@@ -48,6 +48,7 @@ const transport = new StdioClientTransport({
     BROWSER_USE_MCP_HEADLESS: "true",
     BROWSER_USE_MCP_NO_JEV: "1",
     BROWSER_USE_MCP_LOG_LEVEL: "error",
+    PYTHONUTF8: "1",
   },
 });
 let stderr = "";

@@ -818,7 +818,10 @@ fn spawn_harness(
                 browser
                     .map(|path| child_path(&path, cfg!(windows)).to_string_lossy().into_owned())
                     .unwrap_or_default(),
-            );
+            )
+            // The engine reads UTF-8 JavaScript with Python's default locale
+            // encoding; Windows would otherwise use cp1252.
+            .env("PYTHONUTF8", "1");
     }
     command
         .current_dir(home)

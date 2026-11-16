@@ -563,6 +563,8 @@ async function installBrowserUseMcp(target) {
   if (target.os === process.platform && target.cpu === process.arch) {
     run(pythonPath, ["-c", "import jev_ultrafast, browser_harness, websockets"], {
       cwd: BROWSER_USE_MCP_DIR,
+      // The engine reads UTF-8 JavaScript with the default locale encoding.
+      env: { ...process.env, PYTHONUTF8: "1" },
     });
   } else {
     console.log(
